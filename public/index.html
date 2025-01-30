@@ -138,13 +138,26 @@
         return entry.promise;
       }
 
+      // Helper to compute average from an array of times
+      function getAverageTime(times) {
+        if (!times.length) return "--";
+        const sum = times.reduce((acc, t) => acc + t, 0);
+        const avg = sum / times.length;
+        return avg.toFixed(0);
+      }
+
       function App() {
         const [logList, setLogList] = useState([]);
-        // We'll track times + final strings for table display
+
+        // We'll track the latest times + final results for table display
         const [nonPipelineTime, setNonPipelineTime] = useState(null);
         const [nonPipelineResult, setNonPipelineResult] = useState(null);
         const [pipelineTime, setPipelineTime] = useState(null);
         const [pipelineResult, setPipelineResult] = useState(null);
+
+        // We'll keep an array of all times so we can show the average
+        const [nonPipelineTimes, setNonPipelineTimes] = useState([]);
+        const [pipelineTimes, setPipelineTimes] = useState([]);
 
         function pushLog(message) {
           setLogList((old) => [...old, message]);
@@ -169,6 +182,9 @@
             const greeting = await callRPC("makeGreeting", ["Alice"]);
             pushLog("Non-pipeline greeting => " + greeting);
 
+            // OPTIONAL: Add a client delay to highlight difference
+            // await new Promise(r => setTimeout(r, 500));
+
             const finalVal = await callRPC("appendSuffix", [greeting, "!!!"]);
             pushLog("Non-pipeline appended => " + finalVal);
 
@@ -177,6 +193,9 @@
 
             setNonPipelineTime(elapsed.toFixed(0));
             setNonPipelineResult(finalVal);
+
+            // Add to times array
+            setNonPipelineTimes(prev => [...prev, elapsed]);
           } catch (err) {
             pushLog("Error in non-pipeline => " + err.message);
           }
@@ -193,7 +212,7 @@
 
           const start = performance.now();
 
-          // fire both calls:
+          // fire both calls immediately
           const greetingRef = callPipelined("makeGreeting", ["Alice"]);
           const finalRef = callPipelined("appendSuffix", [greetingRef, "!!!"]);
 
@@ -206,33 +225,44 @@
 
             setPipelineTime(elapsed.toFixed(0));
             setPipelineResult(finalVal);
+
+            // Add to times array
+            setPipelineTimes(prev => [...prev, elapsed]);
           } catch (err) {
             pushLog("Error in pipelined => " + err.message);
           }
         }
+
+        // Calculate average times
+        const nonPipelineAvg = getAverageTime(nonPipelineTimes);
+        const pipelineAvg = getAverageTime(pipelineTimes);
 
         return (
           <div>
             <h1>"JSRPC from the browser" Pipelining Demo</h1>
             <p>Why? <a href="https://docs.google.com/document/d/1-V9FTlCjbbd6czDh6lgbu6IfzzWqoRE5PLmrt5q3CXQ/edit?tab=t.0">Read the doc</a></p>
             <p>This is a static index.html page rendering a React app. Inspect the code.</p>
-            <p>Before you get to excited this isn't captnproto at all. This is a hacky AI slop version of the semantics of captnproto pipelined calls over websockets</p>
+            <p>Before you get too excited this isn't Cap'n Proto at all. This is a hacky AI slop version of the semantics of Cap'n Proto pipelined calls over websockets.</p>
             <pre>
-              const greeting = makeGreeting("Alice") // Hello, Alice!
+              {`const greeting = makeGreeting("Alice") // Hello, Alice!`}
             </pre>
             <pre>
-              emphasize(greeting) // Hello, Alice!!!
+              {`emphasize(greeting) // Hello, Alice!!!`}
             </pre>
-            <p><a href="https://github.com/southpolesteve/jsrpc-browser">Here is all the code</a></p>
+            <p>
+              <a href="https://github.com/southpolesteve/jsrpc-browser">Here is all the code</a>
+            </p>
             <p>
               <button onClick={runNonPipelined}>Run Non-Pipelined</button>
               <button onClick={runPipelined}>Run Pipelined</button>
             </p>
+
             <table>
               <thead>
                 <tr>
                   <th>Approach</th>
                   <th>Time (ms)</th>
+                  <th>Average (ms)</th>
                   <th>Final Result</th>
                 </tr>
               </thead>
@@ -240,11 +270,13 @@
                 <tr>
                   <td>Non-Pipelined</td>
                   <td>{nonPipelineTime || "--"}</td>
+                  <td>{nonPipelineAvg}</td>
                   <td>{nonPipelineResult || "--"}</td>
                 </tr>
                 <tr className="highlight">
                   <td>Pipelined</td>
                   <td>{pipelineTime || "--"}</td>
+                  <td>{pipelineAvg}</td>
                   <td>{pipelineResult || "--"}</td>
                 </tr>
               </tbody>
