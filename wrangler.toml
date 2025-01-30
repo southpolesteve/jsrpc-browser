@@ -1,0 +1,8 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "jsrpc-browser"
+main = "worker.js"
+compatibility_date = "2024-09-19"
+assets = { directory = "./public/" }
+routes = [
+  { pattern = "jsrpc-browser.southpolesteve.com", custom_domain = true }
+]

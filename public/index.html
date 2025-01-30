@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>WS RPC Pipelining Demo (UI Table + Logs)</title>
+    <!-- React + ReactDOM from CDN (development builds) -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel for in-browser JSX transformation -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+      body { font-family: sans-serif; margin: 2rem; }
+      button { margin-right: 1rem; }
+      pre { background: #f4f4f4; padding: 1rem; max-height: 200px; overflow-y: auto; }
+      table { border-collapse: collapse; margin-top: 1rem; }
+      th, td { border: 1px solid #ccc; padding: 6px; }
+      .highlight { background: #fafac8; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect } = React;
+
+      // We'll track calls in flight: questionId -> { resolve, reject, done, result }
+      const callsInFlight = new Map();
+      let nextQuestionId = 1;
+      let ws = null;
+
+      function initWebSocket(pushLog) {
+        const protocol = (location.protocol === "https:") ? "wss://" : "ws://";
+        const wsUrl = protocol + location.host + "/rpc";
+
+        pushLog("Creating WebSocket to " + wsUrl);
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+          pushLog("WebSocket connected (onopen)");
+        };
+
+        ws.onclose = (evt) => {
+          pushLog(`WebSocket closed => code=${evt.code}, reason=${evt.reason}`);
+        };
+
+        ws.onerror = (err) => {
+          pushLog("WebSocket error => " + err.message);
+        };
+
+        ws.onmessage = (evt) => {
+          pushLog("Received => " + evt.data);
+          let msg;
+          try {
+            msg = JSON.parse(evt.data);
+          } catch (err) {
+            pushLog("JSON parse error => " + err);
+            return;
+          }
+          if (msg.type === "return") {
+            const entry = callsInFlight.get(msg.answerId);
+            if (entry) {
+              entry.done = true;
+              entry.result = msg.result;
+              if (entry.resolve) entry.resolve(msg.result);
+              callsInFlight.delete(msg.answerId);
+            }
+          } else if (msg.type === "exception") {
+            const entry = callsInFlight.get(msg.answerId);
+            if (entry) {
+              if (entry.reject) entry.reject(new Error(msg.error));
+              callsInFlight.delete(msg.answerId);
+            }
+          } else {
+            pushLog("Unknown message type => " + msg.type);
+          }
+        };
+      }
+
+      // Non-pipelined call => returns a promise
+      function callRPC(method, params) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          return Promise.reject(new Error("WebSocket not OPEN"));
+        }
+        const questionId = nextQuestionId++;
+        return new Promise((resolve, reject) => {
+          callsInFlight.set(questionId, { resolve, reject, done: false });
+          const payload = {
+            type: "call",
+            questionId,
+            method,
+            params
+          };
+          ws.send(JSON.stringify(payload));
+        });
+      }
+
+      // Pipelined call => returns a reference object { resultOf: questionId }
+      function callPipelined(method, params) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          console.warn("callPipelined but socket not open");
+          return { resultOf: -1 };
+        }
+        const questionId = nextQuestionId++;
+        callsInFlight.set(questionId, { done: false, result: null });
+        ws.send(JSON.stringify({
+          type: "call",
+          questionId,
+          method,
+          params
+        }));
+        return { resultOf: questionId };
+      }
+
+      // eventually get the real result from a pipeline ref
+      async function awaitResult(ref) {
+        if (!ref || typeof ref !== "object" || !("resultOf" in ref)) {
+          throw new Error("Not a pipeline reference");
+        }
+        const qId = ref.resultOf;
+        const entry = callsInFlight.get(qId);
+        if (!entry) {
+          throw new Error(`No call in flight for #${qId}`);
+        }
+        if (entry.done) {
+          return entry.result;
+        }
+        // create a promise if we haven't already
+        if (!entry.promise) {
+          entry.promise = new Promise((resolve, reject) => {
+            entry.resolve = (val) => {
+              entry.result = val;
+              entry.done = true;
+              resolve(val);
+            };
+            entry.reject = reject;
+          });
+        }
+        return entry.promise;
+      }
+
+      function App() {
+        const [logList, setLogList] = useState([]);
+        // We'll track times + final strings for table display
+        const [nonPipelineTime, setNonPipelineTime] = useState(null);
+        const [nonPipelineResult, setNonPipelineResult] = useState(null);
+        const [pipelineTime, setPipelineTime] = useState(null);
+        const [pipelineResult, setPipelineResult] = useState(null);
+
+        function pushLog(message) {
+          setLogList((old) => [...old, message]);
+          console.log("UI Log:", message);
+        }
+
+        // init the WS once
+        useEffect(() => {
+          initWebSocket(pushLog);
+        }, []);
+
+        // Non-pipelined test:
+        // 1) makeGreeting("Alice"), wait => result
+        // 2) appendSuffix(result, "!!!"), wait => final
+        async function runNonPipelined() {
+          pushLog("Starting NON-pipelined test");
+          setNonPipelineTime(null);
+          setNonPipelineResult(null);
+
+          const start = performance.now();
+          try {
+            const greeting = await callRPC("makeGreeting", ["Alice"]);
+            pushLog("Non-pipeline greeting => " + greeting);
+
+            const finalVal = await callRPC("appendSuffix", [greeting, "!!!"]);
+            pushLog("Non-pipeline appended => " + finalVal);
+
+            const elapsed = performance.now() - start;
+            pushLog(`Non-pipelined total => ${elapsed.toFixed(0)} ms`);
+
+            setNonPipelineTime(elapsed.toFixed(0));
+            setNonPipelineResult(finalVal);
+          } catch (err) {
+            pushLog("Error in non-pipeline => " + err.message);
+          }
+        }
+
+        // Pipelined test:
+        // greetingRef = callPipelined("makeGreeting", ["Alice"])
+        // finalRef    = callPipelined("appendSuffix", [greetingRef, "!!!"])
+        // => wait for finalRef
+        async function runPipelined() {
+          pushLog("Starting PIPELINED test");
+          setPipelineTime(null);
+          setPipelineResult(null);
+
+          const start = performance.now();
+
+          // fire both calls:
+          const greetingRef = callPipelined("makeGreeting", ["Alice"]);
+          const finalRef = callPipelined("appendSuffix", [greetingRef, "!!!"]);
+
+          try {
+            const finalVal = await awaitResult(finalRef);
+            pushLog("Pipelined final => " + finalVal);
+
+            const elapsed = performance.now() - start;
+            pushLog(`Pipelined total => ${elapsed.toFixed(0)} ms`);
+
+            setPipelineTime(elapsed.toFixed(0));
+            setPipelineResult(finalVal);
+          } catch (err) {
+            pushLog("Error in pipelined => " + err.message);
+          }
+        }
+
+        return (
+          <div>
+            <h1>"JSRPC from the browser" Pipelining Demo</h1>
+            <p>Why? <a href="https://docs.google.com/document/d/1-V9FTlCjbbd6czDh6lgbu6IfzzWqoRE5PLmrt5q3CXQ/edit?tab=t.0">Read the doc</a></p>
+            <p>This is a static index.html page rendering a React app. Inspect the code.</p>
+            <p>Before you get to excited this isn't captnproto at all. This is a hacky AI slop version of the semantics of captnproto pipelined calls over websockets</p>
+            <p>
+              <button onClick={runNonPipelined}>Run Non-Pipelined</button>
+              <button onClick={runPipelined}>Run Pipelined</button>
+            </p>
+            <table>
+              <thead>
+                <tr>
+                  <th>Approach</th>
+                  <th>Time (ms)</th>
+                  <th>Final Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Non-Pipelined</td>
+                  <td>{nonPipelineTime || "--"}</td>
+                  <td>{nonPipelineResult || "--"}</td>
+                </tr>
+                <tr className="highlight">
+                  <td>Pipelined</td>
+                  <td>{pipelineTime || "--"}</td>
+                  <td>{pipelineResult || "--"}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <h3>Log Output</h3>
+            <pre>
+              {logList.map((line, i) => `[${i}] ${line}\n`)}
+            </pre>
+          </div>
+        );
+      }
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+  </body>
+</html>
